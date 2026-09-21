@@ -22,30 +22,47 @@ jobs:
           java-version: '17'
           cache: 'gradle'
 
-      - name: Setup Android SDK & Environment
+      - name: Setup Android SDK, Env & Dummy Debug Keystore
         run: |
+          # 1. Setup local.properties with Android SDK path
           echo "sdk.dir=$ANDROID_HOME" > local.properties
+
+          # 2. Setup .env file for Secrets Gradle Plugin
           if [ -f .env.example ]; then
             cp .env.example .env
           else
             touch .env
           fi
 
-      - name: Ensure Gradle Wrapper Exists
+          # 3. Create debug.keystore if missing (Required by build.gradle.kts)
+          if [ ! -f "debug.keystore" ]; then
+            echo "Generating missing debug.keystore..."
+            keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+      - name: Setup Specific Compatible Gradle Wrapper (v8.9)
         run: |
-          if [ ! -f "gradlew" ]; then
-            echo "Gradle wrapper not found. Generating gradle wrapper..."
-            gradle wrapper --gradle-version 8.11.1 || gradle wrapper
+          # Ensure gradlew uses a fully compatible Gradle version
+          if [ ! -f "gradlew" ] || [ ! -f "gradle/wrapper/gradle-wrapper.jar" ]; then
+            echo "Setting up Gradle 8.9 wrapper..."
+            gradle wrapper --gradle-version 8.9 --distribution-type bin
           fi
           chmod +x gradlew
 
       - name: Build Debug APK
         run: |
-          ./gradlew assembleDebug --no-daemon --info --stacktrace
+          ./gradlew :app:assembleDebug \
+            --no-daemon \
+            --stacktrace \
+            -Dorg.gradle.jvmargs="-Xmx2048m -XX:MaxMetaspaceSize=512m" \
+            -x test \
+            -x lint \
+            -x check \
+            -x testDebugUnitTest
 
       - name: Upload Debug APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug
+          name: StreamFlix-Debug-APK
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
