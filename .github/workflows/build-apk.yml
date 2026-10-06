@@ -8,64 +8,85 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: streamflix-apk-${{ github.ref }}
   cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   build:
-    name: Build & Package Android APK
+    name: Build and Package Android APK
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
-      - name: Checkout Source Code
+      - name: Checkout source
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
-          distribution: 'temurin'
+          distribution: temurin
           java-version: '17'
-          cache: 'gradle'
 
-      - name: Setup Android Debug Keystore
+      - name: Set up Gradle 9.3.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.3.1'
+          cache-cleanup: on-success
+
+      - name: Show build tools
         run: |
-          mkdir -p ~/.android
-          if [ -n "${{ secrets.DEBUG_KEYSTORE_BASE64 }}" ]; then
-            echo "Decoding debug.keystore from repository secrets..."
-            echo "${{ secrets.DEBUG_KEYSTORE_BASE64 }}" | base64 --decode > ~/.android/debug.keystore
-          elif [ ! -f ~/.android/debug.keystore ]; then
-            echo "Generating fallback Android debug keystore..."
-            keytool -genkey -v -keystore ~/.android/debug.keystore \
-              -storepass android -alias androiddebugkey -keypass android \
-              -keyalg RSA -keysize 2048 -validity 10000 \
-              -dname "CN=Android Debug,O=Android,C=US"
-          fi
+          java -version
+          gradle --version
 
-      - name: Grant Execute Permission to Gradle
-        run: chmod +x gradlew || true
-
-      - name: Build Debug APK
-        run: ./gradlew assembleDebug --stacktrace
-
-      - name: Build Release APK
+      - name: Generate CI signing keystore
+        shell: bash
         run: |
-          ./gradlew assembleRelease --stacktrace || echo "Release build completed with default configuration"
+          keytool -genkeypair -v \
+            -keystore "$GITHUB_WORKSPACE/my-upload-key.jks" \
+            -storepass android \
+            -keypass android \
+            -alias upload \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=StreamFlix CI,O=StreamFlix,C=IN"
 
-      - name: Upload Debug APK Artifact
+      - name: Build debug APK
+        run: gradle --no-daemon --stacktrace assembleDebug
+
+      - name: Build signed release APK
+        env:
+          KEYSTORE_PATH: ${{ github.workspace }}/my-upload-key.jks
+          STORE_PASSWORD: android
+          KEY_PASSWORD: android
+        run: gradle --no-daemon --stacktrace assembleRelease
+
+      - name: Verify APK outputs
+        shell: bash
+        run: |
+          set -e
+          test -n "$(find app/build/outputs/apk/debug -name '*.apk' -print -quit)"
+          test -n "$(find app/build/outputs/apk/release -name '*.apk' -print -quit)"
+          echo "Debug APK:"
+          find app/build/outputs/apk/debug -name '*.apk' -print
+          echo "Release APK:"
+          find app/build/outputs/apk/release -name '*.apk' -print
+
+      - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
           name: StreamFlix-Debug-APK
           path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
           retention-days: 14
-          if-no-files-found: warn
 
-      - name: Upload Release APK Artifact
+      - name: Upload signed release APK
         uses: actions/upload-artifact@v4
         with:
-          name: StreamFlix-Release-APK
+          name: StreamFlix-Signed-Release-APK
           path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
           retention-days: 14
-          if-no-files-found: ignore
