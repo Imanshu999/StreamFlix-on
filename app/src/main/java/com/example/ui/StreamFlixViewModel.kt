@@ -52,7 +52,7 @@ class StreamFlixViewModel(
     val playbackRepository = com.example.data.repository.PlaybackRepository()
     val telemetrySecurityRepository = TelemetrySecurityRepository(application)
     val watchHistoryRepository = WatchHistoryRepository(db.watchHistoryDao())
-    val downloadRepository = DownloadRepository(db.downloadDao())
+    val downloadRepository = DownloadRepository(db.downloadDao(), application)
     val reviewRepository = ReviewRepository(db.reviewDao())
     val bookmarkRepository = BookmarkRepository(db.bookmarkDao())
     val authRepository = AuthRepository(application)
