@@ -348,7 +348,7 @@ fun StreamFlixTopBar(
 
         // Category Filter Chips
         Spacer(modifier = Modifier.height(6.dp))
-        val categories = listOf("All", "TV Shows", "Movies", "Trending", "My List")
+        val categories = listOf("All", "Movies", "TV Shows", "Anime", "Cartoon", "Trailers", "Hindi", "English", "Trending", "My List")
         val categoryScrollState = rememberScrollState()
 
         Box(
