@@ -54,12 +54,12 @@ jobs:
             -validity 10000 \
             -dname "CN=StreamFlix CI,O=StreamFlix,C=IN"
 
-      - name: Build signed release APK
+      - name: Build signed release APK with detailed info
         env:
           KEYSTORE_PATH: ${{ github.workspace }}/my-upload-key.jks
           STORE_PASSWORD: android
           KEY_PASSWORD: android
-        run: gradle --stacktrace assembleRelease
+        run: gradle --stacktrace --info assembleRelease
 
       - name: Verify APK outputs
         shell: bash
