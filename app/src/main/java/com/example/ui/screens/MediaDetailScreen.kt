@@ -333,7 +333,7 @@ fun MediaDetailScreen(
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = if (isMovieDownloaded) "Downloaded (1.4 GB) • Tap to Remove" else "Download (1.4 GB)",
+                            text = if (isMovieDownloaded) "Downloaded • Tap to Remove" else "Download",
                             fontSize = 15.sp,
                             fontWeight = FontWeight.SemiBold
                         )
