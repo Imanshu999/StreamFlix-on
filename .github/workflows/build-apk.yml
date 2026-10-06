@@ -55,14 +55,14 @@ jobs:
             -dname "CN=StreamFlix CI,O=StreamFlix,C=IN"
 
       - name: Build debug APK
-        run: gradle --no-daemon --stacktrace assembleDebug
+        run: gradle --stacktrace assembleDebug
 
       - name: Build signed release APK
         env:
           KEYSTORE_PATH: ${{ github.workspace }}/my-upload-key.jks
           STORE_PASSWORD: android
           KEY_PASSWORD: android
-        run: gradle --no-daemon --stacktrace assembleRelease
+        run: gradle --stacktrace assembleRelease
 
       - name: Verify APK outputs
         shell: bash
