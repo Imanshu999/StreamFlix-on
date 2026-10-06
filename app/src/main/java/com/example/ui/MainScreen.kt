@@ -11,6 +11,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.LiveTv
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Refresh
@@ -569,6 +570,7 @@ fun MainScreen(
                             BottomTab.HOME -> {
                                 HomeScreen(
                                     mediaItems = mediaItems,
+                                    top10Items = top10Items,
                                     featuredMedia = featuredMedia,
                                     watchHistory = watchHistory,
                                     favoriteIds = favoriteIds,
@@ -624,6 +626,18 @@ fun MainScreen(
                                             viewModel.navigateTo(ScreenDestination.AdminPortal)
                                         }
                                     }
+                                )
+                            }
+                            BottomTab.TV -> {
+                                TvSectionScreen(
+                                    channels = tvChannels,
+                                    categories = tvCategories,
+                                    isLoading = isTvLoading,
+                                    errorMessage = tvErrorMessage,
+                                    onChannelClick = { channel ->
+                                        viewModel.navigateTo(ScreenDestination.TvPlayer(channel.id))
+                                    },
+                                    onRefresh = { viewModel.loadTvChannels() }
                                 )
                             }
                             BottomTab.HISTORY -> {
