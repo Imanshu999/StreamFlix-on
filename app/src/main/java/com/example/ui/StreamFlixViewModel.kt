@@ -39,6 +39,7 @@ sealed class ScreenDestination {
     object Downloads : ScreenDestination()
     object Profile : ScreenDestination()
     object AdminPortal : ScreenDestination()
+    data class TvPlayer(val channelId: String) : ScreenDestination()
 }
 
 class StreamFlixViewModel(
@@ -47,13 +48,15 @@ class StreamFlixViewModel(
 ) : AndroidViewModel(application) {
 
     private val db = StreamFlixDatabase.getDatabase(application)
-    val mediaRepository = MediaRepository()
+    val mediaRepository = MediaRepository(application)
+    val playbackRepository = com.example.data.repository.PlaybackRepository()
     val telemetrySecurityRepository = TelemetrySecurityRepository(application)
     val watchHistoryRepository = WatchHistoryRepository(db.watchHistoryDao())
     val downloadRepository = DownloadRepository(db.downloadDao())
     val reviewRepository = ReviewRepository(db.reviewDao())
     val bookmarkRepository = BookmarkRepository(db.bookmarkDao())
     val authRepository = AuthRepository(application)
+    val iptvRepository = com.example.data.repository.IptvRepository(application)
     val firebaseStorageRepository = com.example.data.repository.FirebaseStorageRepository(application)
 
     private val _isUploadingMedia = MutableStateFlow(false)
@@ -92,6 +95,15 @@ class StreamFlixViewModel(
 
     // State flows from repositories
     val mediaItems: StateFlow<List<MediaItem>> = mediaRepository.mediaItems
+    val top10Items: StateFlow<List<MediaItem>> = mediaRepository.top10Items
+    val isMediaLoading: StateFlow<Boolean> = mediaRepository.isLoading
+    val searchSuggestions: StateFlow<List<String>> = mediaRepository.searchSuggestions
+
+    // IPTV Live Channels & Categories
+    val tvChannels: StateFlow<List<com.example.data.model.LiveChannel>> = iptvRepository.channels
+    val tvCategories: StateFlow<List<String>> = iptvRepository.categories
+    val isTvLoading: StateFlow<Boolean> = iptvRepository.isLoading
+    val tvErrorMessage: StateFlow<String?> = iptvRepository.errorMessage
 
     val featuredMedia: StateFlow<MediaItem?> = mediaRepository.mediaItems
         .combine(searchQuery) { items, _ ->
@@ -245,6 +257,10 @@ class StreamFlixViewModel(
             is ScreenDestination.AdminPortal -> {
                 savedStateHandle[KEY_CURRENT_SCREEN] = "AdminPortal"
             }
+            is ScreenDestination.TvPlayer -> {
+                savedStateHandle[KEY_CURRENT_SCREEN] = "TvPlayer"
+                savedStateHandle[KEY_SCREEN_MEDIA_ID] = screen.channelId
+            }
         }
     }
 
@@ -260,7 +276,14 @@ class StreamFlixViewModel(
             "Downloads" -> ScreenDestination.Downloads
             "Profile" -> ScreenDestination.Profile
             "AdminPortal" -> if (isAuthorizedAdmin()) ScreenDestination.AdminPortal else ScreenDestination.Home
+            "TvPlayer" -> if (mediaId != null) ScreenDestination.TvPlayer(mediaId) else ScreenDestination.Home
             else -> null
+        }
+    }
+
+    fun loadTvChannels(forceRefresh: Boolean = false) {
+        viewModelScope.launch {
+            iptvRepository.loadChannels(forceRefresh = forceRefresh)
         }
     }
 
@@ -477,6 +500,14 @@ class StreamFlixViewModel(
     fun deleteMediaFromCMS(id: String) {
         mediaRepository.deleteMedia(id)
         _adminNotification.value = "Item removed from catalog"
+    }
+
+    suspend fun loadSubjectDetail(subjectId: String): MediaItem? {
+        return mediaRepository.fetchSubjectDetail(subjectId)
+    }
+
+    suspend fun loadRecommendations(subjectId: String): List<MediaItem> {
+        return mediaRepository.fetchRecommendations(subjectId)
     }
 
     fun refreshCatalogFromFirestore() {

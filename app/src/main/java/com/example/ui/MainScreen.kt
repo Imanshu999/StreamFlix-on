@@ -33,7 +33,7 @@ import com.example.ui.screens.*
 import com.example.ui.theme.*
 
 enum class BottomTab {
-    HOME, HISTORY, DOWNLOADS, PROFILE
+    HOME, TV, HISTORY, DOWNLOADS, PROFILE
 }
 
 @Composable
@@ -45,6 +45,13 @@ fun MainScreen(
     val isClientBanned by viewModel.isClientBanned.collectAsStateWithLifecycle()
 
     val mediaItems by viewModel.mediaItems.collectAsStateWithLifecycle()
+    val top10Items by viewModel.top10Items.collectAsStateWithLifecycle()
+    val isMediaLoading by viewModel.isMediaLoading.collectAsStateWithLifecycle()
+    val searchSuggestions by viewModel.searchSuggestions.collectAsStateWithLifecycle()
+    val tvChannels by viewModel.tvChannels.collectAsStateWithLifecycle()
+    val tvCategories by viewModel.tvCategories.collectAsStateWithLifecycle()
+    val isTvLoading by viewModel.isTvLoading.collectAsStateWithLifecycle()
+    val tvErrorMessage by viewModel.tvErrorMessage.collectAsStateWithLifecycle()
     val featuredMedia by viewModel.featuredMedia.collectAsStateWithLifecycle()
     val watchHistory by viewModel.watchHistory.collectAsStateWithLifecycle()
     val downloads by viewModel.downloads.collectAsStateWithLifecycle()
@@ -222,6 +229,44 @@ fun MainScreen(
         }
     }
 
+    // Live TV Player Screen (Separate IPTV playback subsystem)
+    if (currentScreen is ScreenDestination.TvPlayer) {
+        val tvDest = currentScreen as ScreenDestination.TvPlayer
+        val channel = tvChannels.find { it.id == tvDest.channelId }
+        if (channel != null) {
+            BackHandler {
+                activeBottomTab = BottomTab.TV
+                viewModel.navigateTo(ScreenDestination.Home)
+            }
+            TvPlayerScreen(
+                channel = channel,
+                onBackClick = {
+                    activeBottomTab = BottomTab.TV
+                    viewModel.navigateTo(ScreenDestination.Home)
+                }
+            )
+            return
+        } else {
+            BackHandler {
+                activeBottomTab = BottomTab.TV
+                viewModel.navigateTo(ScreenDestination.Home)
+            }
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(NetflixBlack),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    CircularProgressIndicator(color = NetflixRed)
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text("Loading live TV channel...", color = NetflixLightGrey, fontSize = 14.sp)
+                }
+            }
+            return
+        }
+    }
+
     // Detail Screen (No bottom bar for immersive preview)
     if (currentScreen is ScreenDestination.MediaDetail) {
         val detail = currentScreen as ScreenDestination.MediaDetail
@@ -381,6 +426,34 @@ fun MainScreen(
                         indicatorColor = Color.Transparent
                     ),
                     modifier = Modifier.testTag("nav_tab_home")
+                )
+
+                // TV / IPTV Tab
+                NavigationBarItem(
+                    selected = activeBottomTab == BottomTab.TV,
+                    onClick = {
+                        if (isOffline) {
+                            showOfflineModal = true
+                        } else {
+                            activeBottomTab = BottomTab.TV
+                            viewModel.navigateTo(ScreenDestination.Home)
+                            if (tvChannels.isEmpty()) {
+                                viewModel.loadTvChannels()
+                            }
+                        }
+                    },
+                    icon = {
+                        Icon(imageVector = Icons.Default.LiveTv, contentDescription = "Live TV")
+                    },
+                    label = { Text("Live TV", fontSize = 11.sp) },
+                    colors = NavigationBarItemDefaults.colors(
+                        selectedIconColor = NetflixRed,
+                        selectedTextColor = NetflixWhite,
+                        unselectedIconColor = if (isOffline) NetflixLightGrey.copy(alpha = 0.5f) else NetflixLightGrey,
+                        unselectedTextColor = if (isOffline) NetflixLightGrey.copy(alpha = 0.5f) else NetflixLightGrey,
+                        indicatorColor = Color.Transparent
+                    ),
+                    modifier = Modifier.testTag("nav_tab_tv")
                 )
 
                 // History Tab

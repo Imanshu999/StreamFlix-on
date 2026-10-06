@@ -39,5 +39,8 @@ data class MediaItem(
     val cast: List<String> = emptyList(),
     val seasons: List<SeasonData> = emptyList(),
     val isTop10: Boolean = false,
-    val badgeLabel: String? = null
+    val badgeLabel: String? = null,
+    val availableLanguages: List<String> = emptyList(),
+    val availableVersions: List<MediaVersion> = emptyList(),
+    val countryName: String = ""
 )

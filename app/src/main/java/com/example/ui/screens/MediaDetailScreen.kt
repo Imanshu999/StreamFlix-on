@@ -363,6 +363,54 @@ fun MediaDetailScreen(
                         fontSize = 12.sp
                     )
 
+                    // Feature 4: Display Available Language & Dub Versions
+                    if (media.availableVersions.isNotEmpty() || media.availableLanguages.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Text(
+                            text = "Audio & Dub Versions:",
+                            color = NetflixWhite,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            if (media.availableVersions.isNotEmpty()) {
+                                media.availableVersions.take(4).forEach { ver ->
+                                    Surface(
+                                        color = Color(0xFFFF9800).copy(alpha = 0.2f),
+                                        border = BorderStroke(1.dp, Color(0xFFFF9800).copy(alpha = 0.6f)),
+                                        shape = RoundedCornerShape(6.dp)
+                                    ) {
+                                        Text(
+                                            text = ver.label,
+                                            color = Color(0xFFFFB74D),
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                        )
+                                    }
+                                }
+                            } else {
+                                media.availableLanguages.take(4).forEach { lang ->
+                                    Surface(
+                                        color = Color.White.copy(alpha = 0.1f),
+                                        shape = RoundedCornerShape(6.dp)
+                                    ) {
+                                        Text(
+                                            text = "$lang Audio",
+                                            color = NetflixWhite,
+                                            fontSize = 11.sp,
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     Spacer(modifier = Modifier.height(18.dp))
 
                     // Action Icons Bar (My List, Rate, Share)

@@ -3,15 +3,18 @@ package com.example.ui.components
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AdminPanelSettings
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.TrendingUp
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -22,9 +25,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import com.example.data.model.MediaItem
 import com.example.ui.theme.*
 
 @Composable
@@ -37,11 +42,28 @@ fun StreamFlixTopBar(
     isGuest: Boolean,
     isAdmin: Boolean = false,
     availableGenres: List<String> = emptyList(),
+    allMedia: List<MediaItem> = emptyList(),
+    trendingSuggestions: List<String> = emptyList(),
+    onMediaSelected: (MediaItem) -> Unit = {},
     onProfileClick: () -> Unit,
     onAdminClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     var isSearchExpanded by remember { mutableStateOf(false) }
+
+    // Live search suggestions filtered by title or genre
+    val activeSuggestions = remember(searchQuery, allMedia, trendingSuggestions) {
+        if (searchQuery.isBlank()) {
+            emptyList()
+        } else {
+            val q = searchQuery.trim()
+            allMedia.filter { item ->
+                item.title.contains(q, ignoreCase = true) ||
+                item.genres.any { it.contains(q, ignoreCase = true) } ||
+                item.availableLanguages.any { it.contains(q, ignoreCase = true) }
+            }.take(6)
+        }
+    }
 
     Column(
         modifier = modifier
@@ -49,8 +71,8 @@ fun StreamFlixTopBar(
             .background(
                 Brush.verticalGradient(
                     colors = listOf(
+                        Color.Black.copy(alpha = 0.85f),
                         Color.Black.copy(alpha = 0.65f),
-                        Color.Black.copy(alpha = 0.25f),
                         Color.Transparent
                     )
                 )
@@ -65,21 +87,21 @@ fun StreamFlixTopBar(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            // Brand Logo: Styled Text ("Stream" in Yellow + "Flix" in Red, No Icon)
+            // Brand Logo
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.testTag("brand_logo_row")
             ) {
                 Text(
                     text = "Stream",
-                    color = Color(0xFFFFD700), // Vibrant Yellow (#FFD700)
+                    color = Color(0xFFFFD700),
                     fontSize = 22.sp,
                     fontWeight = FontWeight.Black,
                     letterSpacing = 0.5.sp
                 )
                 Text(
                     text = "Flix",
-                    color = NetflixRed, // Vibrant Red (#E50914)
+                    color = NetflixRed,
                     fontSize = 22.sp,
                     fontWeight = FontWeight.Black,
                     letterSpacing = 0.5.sp
@@ -91,7 +113,6 @@ fun StreamFlixTopBar(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                // Search toggle
                 IconButton(
                     onClick = { isSearchExpanded = !isSearchExpanded },
                     modifier = Modifier.testTag("search_toggle_button")
@@ -103,7 +124,6 @@ fun StreamFlixTopBar(
                     )
                 }
 
-                // Admin direct access button - STRICTLY HIDDEN FOR NON-ADMINS
                 if (isAdmin) {
                     IconButton(
                         onClick = onAdminClick,
@@ -122,7 +142,6 @@ fun StreamFlixTopBar(
                     }
                 }
 
-                // User Avatar (Sleek Instagram-style minimal vector avatar)
                 Box(
                     modifier = Modifier
                         .size(36.dp)
@@ -141,13 +160,13 @@ fun StreamFlixTopBar(
             }
         }
 
-        // Expandable Search Bar
+        // Expandable Smart Search Bar
         if (isSearchExpanded || searchQuery.isNotBlank()) {
             Spacer(modifier = Modifier.height(10.dp))
             OutlinedTextField(
                 value = searchQuery,
                 onValueChange = onSearchQueryChange,
-                placeholder = { Text("Search by title, genre, or keywords...", color = NetflixLightGrey, fontSize = 13.sp) },
+                placeholder = { Text("Search titles, genres, Hindi/English...", color = NetflixLightGrey, fontSize = 13.sp) },
                 singleLine = true,
                 leadingIcon = {
                     Icon(
@@ -183,8 +202,118 @@ fun StreamFlixTopBar(
                     .testTag("search_input_field")
             )
 
-            // Quick search suggestions chips from live catalog
-            if (availableGenres.isNotEmpty()) {
+            // When searching, display smart live dropdown
+            if (activeSuggestions.isNotEmpty()) {
+                Surface(
+                    color = Color(0xFF1E2129),
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, NetflixCardBorder),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 6.dp)
+                ) {
+                    Column(modifier = Modifier.padding(vertical = 4.dp)) {
+                        activeSuggestions.forEach { item ->
+                            val versionLabel = item.availableVersions.firstOrNull()?.label
+                                ?: if (item.countryName.equals("India", ignoreCase = true)) "Hindi Version" else "English Version"
+
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        onSearchQueryChange("")
+                                        isSearchExpanded = false
+                                        onMediaSelected(item)
+                                    }
+                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                AsyncImage(
+                                    model = item.posterUrl,
+                                    contentDescription = item.title,
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier
+                                        .size(36.dp, 50.dp)
+                                        .clip(RoundedCornerShape(4.dp))
+                                )
+
+                                Spacer(modifier = Modifier.width(12.dp))
+
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = item.title,
+                                        color = NetflixWhite,
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Text(
+                                            text = item.releaseYear.toString(),
+                                            color = NetflixLightGrey,
+                                            fontSize = 11.sp
+                                        )
+                                        Surface(
+                                            color = Color(0xFFFF9800).copy(alpha = 0.2f),
+                                            shape = RoundedCornerShape(2.dp)
+                                        ) {
+                                            Text(
+                                                text = versionLabel,
+                                                color = Color(0xFFFFB74D),
+                                                fontSize = 9.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                            Divider(color = NetflixCardBorder.copy(alpha = 0.5f), thickness = 0.5.dp)
+                        }
+                    }
+                }
+            } else if (searchQuery.isBlank() && trendingSuggestions.isNotEmpty()) {
+                // Pre-typing Trending Suggestions Bar
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .padding(vertical = 2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.TrendingUp,
+                        contentDescription = "Trending",
+                        tint = NetflixRed,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    trendingSuggestions.take(6).forEach { suggestion ->
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(NetflixCardSurface.copy(alpha = 0.7f))
+                                .border(0.5.dp, NetflixCardBorder, RoundedCornerShape(12.dp))
+                                .clickable { onSearchQueryChange(suggestion) }
+                                .padding(horizontal = 10.dp, vertical = 4.dp)
+                        ) {
+                            Text(
+                                text = suggestion,
+                                color = NetflixWhite,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                    }
+                }
+            } else if (availableGenres.isNotEmpty()) {
+                // Quick Genre Chips
                 Spacer(modifier = Modifier.height(8.dp))
                 Row(
                     modifier = Modifier
@@ -216,7 +345,7 @@ fun StreamFlixTopBar(
             }
         }
 
-        // Category Filter Chips (Tightly aligned near top, translucent aesthetic)
+        // Category Filter Chips
         Spacer(modifier = Modifier.height(6.dp))
         val categories = listOf("All", "TV Shows", "Movies", "Trending", "My List")
         val categoryScrollState = rememberScrollState()
@@ -257,7 +386,6 @@ fun StreamFlixTopBar(
                         )
                     }
                 }
-                // Generous end padding spacer so "My List" never overflows or clips
                 Spacer(modifier = Modifier.width(28.dp))
             }
         }

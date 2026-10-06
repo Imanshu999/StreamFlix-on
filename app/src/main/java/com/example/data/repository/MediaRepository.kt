@@ -1,18 +1,32 @@
 package com.example.data.repository
 
+import android.content.Context
 import android.util.Log
 import com.example.data.model.EpisodeData
 import com.example.data.model.MediaItem
 import com.example.data.model.MediaType
+import com.example.data.model.MediaVersion
 import com.example.data.model.SeasonData
+import com.example.data.network.api.MovieBoxApiClient
+import com.example.data.network.dto.SubjectDto
 import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
+import com.squareup.moshi.Moshi
+import com.squareup.moshi.Types
+import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
-class MediaRepository {
+class MediaRepository(private val context: Context? = null) {
+
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     private val firestore: FirebaseFirestore? = try {
         FirebaseFirestore.getInstance()
@@ -21,48 +35,288 @@ class MediaRepository {
         null
     }
 
-    // Initial state is empty; media items are fetched and synchronized in real-time from Firebase Firestore
+    private val api = MovieBoxApiClient.service
+
     private val _mediaItems = MutableStateFlow<List<MediaItem>>(emptyList())
     val mediaItems: StateFlow<List<MediaItem>> = _mediaItems.asStateFlow()
+
+    private val _top10Items = MutableStateFlow<List<MediaItem>>(emptyList())
+    val top10Items: StateFlow<List<MediaItem>> = _top10Items.asStateFlow()
+
+    private val _searchSuggestions = MutableStateFlow<List<String>>(emptyList())
+    val searchSuggestions: StateFlow<List<String>> = _searchSuggestions.asStateFlow()
 
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
 
     private var snapshotListenerRegistration: ListenerRegistration? = null
 
+    // Cache to hold remote fetched media alongside Firestore live entries
+    private val apiMediaMap = mutableMapOf<String, MediaItem>()
+    private val firestoreMediaMap = mutableMapOf<String, MediaItem>()
+    private val top10IdList = mutableListOf<String>()
+
     init {
+        // 1. Instantly populate with the real bundled catalog to ensure zero cold-start delay
+        loadBundledCatalog()
+
+        // 2. Start Firebase Firestore sync
         startFirestoreLiveSync()
+
+        // 3. Fetch live feed from api.inmoviebox.com / wefeed-mobile-bff endpoints
+        fetchLiveCatalogFromApi()
+
+        // 4. Fetch search suggestions
+        fetchSearchSuggestions()
+    }
+
+    private fun loadBundledCatalog() {
+        if (context == null) return
+        try {
+            val jsonString = context.assets.open("catalog.json").bufferedReader().use { it.readText() }
+            val moshi = Moshi.Builder().add(KotlinJsonAdapterFactory()).build()
+            val listType = Types.newParameterizedType(List::class.java, MediaItem::class.java)
+            val adapter = moshi.adapter<List<MediaItem>>(listType)
+            val items = adapter.fromJson(jsonString)
+            if (!items.isNullOrEmpty()) {
+                items.forEach { apiMediaMap[it.id] = it }
+                updateCombinedMediaItems()
+                Log.d(TAG, "Loaded ${items.size} real media titles from catalog.json")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to load bundled catalog.json", e)
+        }
+    }
+
+    fun fetchLiveCatalogFromApi(forceRefresh: Boolean = false) {
+        scope.launch {
+            _isLoading.value = true
+            try {
+                // Fetch Home operating blocks
+                val homeResponse = api.getHome("h5.inmoviebox.com")
+                if (homeResponse.isSuccessful && homeResponse.body()?.data?.operatingList != null) {
+                    val ops = homeResponse.body()!!.data!!.operatingList!!
+                    for (op in ops) {
+                        val categoryName = op.title ?: "Popular"
+                        // Banner Hero Items
+                        if (op.type == "BANNER" && op.banner?.items != null) {
+                            for (item in op.banner!!.items!!) {
+                                val sub = item.subject
+                                if (sub != null && !sub.subjectId.isNullOrBlank()) {
+                                    val mapped = mapSubjectDtoToMediaItem(
+                                        dto = sub,
+                                        forcedCategory = "Featured Banner",
+                                        isFeatured = true,
+                                        bannerOverride = MovieBoxApiClient.resolveImageUrl(item.image?.url)
+                                    )
+                                    apiMediaMap[mapped.id] = mapped
+                                }
+                            }
+                        }
+                        // Operating category subjects
+                        if (op.subjects != null) {
+                            for (sub in op.subjects!!) {
+                                if (!sub.subjectId.isNullOrBlank()) {
+                                    val existing = apiMediaMap[sub.subjectId!!]
+                                    val mapped = mapSubjectDtoToMediaItem(
+                                        dto = sub,
+                                        forcedCategory = existing?.category ?: categoryName,
+                                        isFeatured = existing?.isFeatured ?: false
+                                    )
+                                    apiMediaMap[mapped.id] = mapped
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Fetch Trending (defines official Top 10 popular ranking)
+                val trendingResponse = api.getTrending(page = 1, perPage = 50)
+                if (trendingResponse.isSuccessful && trendingResponse.body()?.data?.subjectList != null) {
+                    val trendings = trendingResponse.body()!!.data!!.subjectList!!
+                    top10IdList.clear()
+                    for ((index, sub) in trendings.withIndex()) {
+                        if (!sub.subjectId.isNullOrBlank()) {
+                            val id = sub.subjectId!!
+                            if (index < 10) {
+                                top10IdList.add(id)
+                            }
+                            val existing = apiMediaMap[id]
+                            val mapped = mapSubjectDtoToMediaItem(
+                                dto = sub,
+                                forcedCategory = existing?.category ?: "Trending Now",
+                                isFeatured = existing?.isFeatured ?: false,
+                                isTop10Rank = index < 10
+                            )
+                            apiMediaMap[mapped.id] = mapped
+                        }
+                    }
+                }
+
+                // Fetch Tab Operating (Genres & Discoveries)
+                try {
+                    val tabResponse = api.getTabOperating("h5.inmoviebox.com")
+                    if (tabResponse.isSuccessful && tabResponse.body()?.data?.operatingList != null) {
+                        for (op in tabResponse.body()!!.data!!.operatingList!!) {
+                            val categoryName = op.title ?: "Discover"
+                            op.subjects?.forEach { sub ->
+                                if (!sub.subjectId.isNullOrBlank()) {
+                                    val existing = apiMediaMap[sub.subjectId!!]
+                                    val mapped = mapSubjectDtoToMediaItem(
+                                        dto = sub,
+                                        forcedCategory = existing?.category ?: categoryName,
+                                        isFeatured = existing?.isFeatured ?: false
+                                    )
+                                    apiMediaMap[mapped.id] = mapped
+                                }
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Optional tab-operating fetch warning: ${e.message}")
+                }
+
+                withContext(Dispatchers.Main) {
+                    updateCombinedMediaItems(shouldRotate = forceRefresh)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to fetch live API catalog: ${e.message}", e)
+            } finally {
+                _isLoading.value = false
+            }
+        }
+    }
+
+    fun fetchSearchSuggestions() {
+        scope.launch {
+            try {
+                val res = api.getSearchSuggestions()
+                if (res.isSuccessful && res.body()?.data?.everyoneSearch != null) {
+                    val list = res.body()!!.data!!.everyoneSearch!!.mapNotNull { it.title?.trim() }
+                    if (list.isNotEmpty()) {
+                        _searchSuggestions.value = list
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Search suggestions fetch failed: ${e.message}")
+            }
+        }
+    }
+
+    suspend fun fetchSubjectDetail(subjectId: String): MediaItem? = withContext(Dispatchers.IO) {
+        try {
+            val res = api.getSubjectDetail(subjectId)
+            if (res.isSuccessful && res.body()?.data?.subject != null) {
+                val data = res.body()!!.data!!
+                val existing = apiMediaMap[subjectId]
+                val item = mapSubjectDtoToMediaItem(
+                    dto = data.subject!!,
+                    forcedCategory = existing?.category ?: "Popular",
+                    isFeatured = existing?.isFeatured ?: false,
+                    stars = data.stars
+                )
+                // Attach seasons info if available from resource
+                val resourceSeasons = data.resource?.seasons
+                val seasonsData = if (item.type == MediaType.SERIES && !resourceSeasons.isNullOrEmpty()) {
+                    resourceSeasons.map { sRes ->
+                        val sNum = sRes.se ?: 1
+                        val maxEp = (sRes.maxEp ?: 1).coerceAtMost(30)
+                        SeasonData(
+                            seasonNumber = sNum,
+                            title = "Season $sNum",
+                            episodes = (1..maxEp).map { epNum ->
+                                EpisodeData(
+                                    id = "${subjectId}_s${sNum}_e${epNum}",
+                                    episodeNumber = epNum,
+                                    title = "Episode $epNum",
+                                    overview = item.description,
+                                    thumbnailUrl = item.bannerUrl.ifEmpty { item.posterUrl },
+                                    durationMinutes = 45,
+                                    streamUrl = item.directStreamUrl
+                                )
+                            }
+                        )
+                    }
+                } else item.seasons
+
+                val updatedItem = item.copy(seasons = seasonsData)
+                apiMediaMap[subjectId] = updatedItem
+                withContext(Dispatchers.Main) {
+                    updateCombinedMediaItems()
+                }
+                return@withContext updatedItem
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error fetching detail for $subjectId", e)
+        }
+        return@withContext apiMediaMap[subjectId] ?: firestoreMediaMap[subjectId]
+    }
+
+    suspend fun fetchRecommendations(subjectId: String): List<MediaItem> = withContext(Dispatchers.IO) {
+        try {
+            val res = api.getDetailRecommendations(subjectId, page = 1, perPage = 12)
+            if (res.isSuccessful && res.body()?.data?.items != null) {
+                return@withContext res.body()!!.data!!.items!!.map { dto ->
+                    mapSubjectDtoToMediaItem(dto, forcedCategory = "More Like This")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error fetching recommendations for $subjectId", e)
+        }
+        return@withContext emptyList()
+    }
+
+    private fun updateCombinedMediaItems(shouldRotate: Boolean = false) {
+        val combined = mutableMapOf<String, MediaItem>()
+        // API items first
+        combined.putAll(apiMediaMap)
+        // Firestore items override or supplement
+        combined.putAll(firestoreMediaMap)
+
+        var list = combined.values.toList()
+
+        if (shouldRotate && list.size > 20) {
+            // Intelligent content rotation on refresh: keep top 10 at peak, rotate remainder
+            val topItems = list.filter { it.isTop10 || it.isFeatured }
+            val rest = list.filter { !it.isTop10 && !it.isFeatured }.shuffled()
+            list = topItems + rest
+        }
+
+        _mediaItems.value = list
+
+        // Update dedicated Top 10 list
+        val top10s = if (top10IdList.isNotEmpty()) {
+            top10IdList.mapNotNull { combined[it] }
+        } else {
+            list.filter { it.isTop10 || it.isFeatured }.take(10)
+        }
+        _top10Items.value = top10s.ifEmpty { list.take(10) }
     }
 
     /**
      * Connects real-time snapshot listener to Firestore collection "media".
-     * Live updates automatically propagate to all observers.
-     * Content is strictly retrieved from Firebase; if the collection is empty,
-     * the catalog remains empty until uploaded by an admin.
      */
     fun startFirestoreLiveSync() {
-        if (firestore == null) {
-            _isLoading.value = false
-            return
-        }
+        if (firestore == null) return
 
         snapshotListenerRegistration?.remove()
-        _isLoading.value = true
 
         snapshotListenerRegistration = firestore.collection(COLLECTION_MEDIA)
             .addSnapshotListener { snapshot, error ->
-                _isLoading.value = false
                 if (error != null) {
                     Log.e(TAG, "Firestore media collection listen error: ${error.message}", error)
                     return@addSnapshotListener
                 }
 
                 if (snapshot != null) {
-                    val parsed = snapshot.documents.mapNotNull { doc ->
-                        mapDocumentToMediaItem(doc)
+                    firestoreMediaMap.clear()
+                    snapshot.documents.forEach { doc ->
+                        mapDocumentToMediaItem(doc)?.let { item ->
+                            firestoreMediaMap[item.id] = item
+                        }
                     }
-                    _mediaItems.value = parsed
-                    Log.d(TAG, "Real-time sync: Received ${parsed.size} media items from Firestore")
+                    updateCombinedMediaItems()
+                    Log.d(TAG, "Firestore sync: ${firestoreMediaMap.size} custom items")
                 }
             }
     }
@@ -71,27 +325,10 @@ class MediaRepository {
         return _mediaItems.value.find { it.id == id }
     }
 
-    /**
-     * Persists media item to Firebase Firestore live collection.
-     */
     fun addOrUpdateMedia(item: MediaItem) {
-        // Optimistic local update for instantaneous UI reactivity
-        val current = _mediaItems.value.toMutableList()
-        val index = current.indexOfFirst { it.id == item.id }
-        if (index >= 0) {
-            current[index] = item
-        } else {
-            current.add(0, item)
-        }
-        if (item.isFeatured) {
-            _mediaItems.value = current.map {
-                if (it.id == item.id) it else it.copy(isFeatured = false)
-            }
-        } else {
-            _mediaItems.value = current
-        }
+        firestoreMediaMap[item.id] = item
+        updateCombinedMediaItems()
 
-        // Live write to Firebase Firestore
         firestore?.let { db ->
             val dataMap = mediaItemToMap(item)
             db.collection(COLLECTION_MEDIA)
@@ -103,18 +340,9 @@ class MediaRepository {
                 .addOnFailureListener { e ->
                     Log.e(TAG, "Failed to write '${item.title}' to Firestore", e)
                 }
-
-            if (item.isFeatured) {
-                current.filter { it.id != item.id && it.isFeatured }.forEach { other ->
-                    db.collection(COLLECTION_MEDIA).document(other.id).update("isFeatured", false)
-                }
-            }
         }
     }
 
-    /**
-     * Designates a media item as the top hero featured title in Firestore.
-     */
     fun setFeaturedMedia(id: String) {
         val current = _mediaItems.value.map {
             if (it.id == id) it.copy(isFeatured = true) else it.copy(isFeatured = false)
@@ -130,55 +358,44 @@ class MediaRepository {
         }
     }
 
-    /**
-     * Toggles Top 10 status in Firestore.
-     */
     fun toggleTop10(id: String) {
         val target = _mediaItems.value.find { it.id == id } ?: return
         val newTop10 = !target.isTop10
-        _mediaItems.value = _mediaItems.value.map {
-            if (it.id == id) it.copy(isTop10 = newTop10) else it
+        val updated = target.copy(isTop10 = newTop10)
+        if (firestoreMediaMap.containsKey(id)) {
+            firestoreMediaMap[id] = updated
+        } else {
+            apiMediaMap[id] = updated
         }
+        updateCombinedMediaItems()
 
         firestore?.collection(COLLECTION_MEDIA)
             ?.document(id)
             ?.update("isTop10", newTop10)
     }
 
-    /**
-     * Deletes a media item from Firestore and local cache.
-     */
     fun deleteMedia(id: String) {
-        _mediaItems.value = _mediaItems.value.filter { it.id != id }
+        firestoreMediaMap.remove(id)
+        apiMediaMap.remove(id)
+        updateCombinedMediaItems()
 
         firestore?.collection(COLLECTION_MEDIA)
             ?.document(id)
             ?.delete()
-            ?.addOnSuccessListener {
-                Log.d(TAG, "Deleted media item '$id' from Firestore")
-            }
-            ?.addOnFailureListener { e ->
-                Log.e(TAG, "Failed to delete media item '$id' from Firestore", e)
-            }
     }
 
-    /**
-     * Refreshes the real-time snapshot listener from Firestore.
-     */
     fun refreshCatalog() {
+        fetchLiveCatalogFromApi(forceRefresh = true)
         startFirestoreLiveSync()
     }
 
-    /**
-     * Deletes all items from Firestore collection.
-     */
     fun clearCatalog() {
-        val allIds = _mediaItems.value.map { it.id }
-        _mediaItems.value = emptyList()
+        firestoreMediaMap.clear()
+        updateCombinedMediaItems()
 
         firestore?.let { db ->
-            allIds.forEach { id ->
-                db.collection(COLLECTION_MEDIA).document(id).delete()
+            db.collection(COLLECTION_MEDIA).get().addOnSuccessListener { snapshot ->
+                snapshot.documents.forEach { it.reference.delete() }
             }
         }
     }
@@ -187,9 +404,145 @@ class MediaRepository {
         private const val TAG = "MediaRepository"
         const val COLLECTION_MEDIA = "media"
 
-        /**
-         * Serializes a MediaItem into a Firestore document map.
-         */
+        fun mapSubjectDtoToMediaItem(
+            dto: SubjectDto,
+            forcedCategory: String = "Popular",
+            isFeatured: Boolean = false,
+            bannerOverride: String? = null,
+            stars: List<com.example.data.network.dto.StaffDto>? = null,
+            isTop10Rank: Boolean = false
+        ): MediaItem {
+            val id = dto.subjectId ?: "media_${System.currentTimeMillis()}"
+            val isSeries = dto.subjectType == 2
+            val type = if (isSeries) MediaType.SERIES else MediaType.MOVIE
+
+            val releaseYear = dto.releaseDate?.take(4)?.toIntOrNull() ?: 2024
+            val genres = dto.genre?.split(",")?.map { it.trim() }?.filter { it.isNotBlank() } ?: listOf("Drama")
+            val ratingScore = dto.imdbRatingValue?.toFloatOrNull() ?: 7.5f
+            val matchPercentage = (70 + (ratingScore * 3).toInt()).coerceIn(70, 99)
+
+            val posterUrl = MovieBoxApiClient.resolveImageUrl(dto.cover?.url)
+            val trailerCover = MovieBoxApiClient.resolveImageUrl(dto.trailer?.cover?.url)
+            val bannerUrl = bannerOverride?.ifEmpty { null } ?: trailerCover.ifEmpty { posterUrl }
+            val directStreamUrl = dto.trailer?.videoAddress?.url ?: ""
+
+            val durationText = when {
+                dto.duration != null && dto.duration > 0 -> "${(dto.duration / 60)}m"
+                isSeries -> "TV Series"
+                else -> "2h 5m"
+            }
+
+            val castList = (stars ?: dto.staffList)?.mapNotNull { it.name?.trim() }?.filter { it.isNotBlank() } ?: emptyList()
+
+            // Extract language versions from dubs and subtitles
+            val availableVersions = mutableListOf<MediaVersion>()
+            val languageSet = linkedSetOf<String>()
+
+            // 1. Check official dubs list
+            dto.dubs?.forEach { dub ->
+                val lanName = dub.lanName ?: "Audio"
+                val label = when {
+                    lanName.contains("Hindi", ignoreCase = true) -> "Hindi Version"
+                    lanName.contains("English", ignoreCase = true) -> "English Version"
+                    lanName.contains("Tamil", ignoreCase = true) -> "Tamil Version"
+                    lanName.contains("Telugu", ignoreCase = true) -> "Telugu Version"
+                    lanName.contains("Malayalam", ignoreCase = true) -> "Malayalam Version"
+                    lanName.contains("Spanish", ignoreCase = true) || lanName.contains("Español", ignoreCase = true) -> "Spanish Version"
+                    lanName.contains("Original", ignoreCase = true) -> "Original Version"
+                    else -> "$lanName Version"
+                }
+                availableVersions.add(
+                    MediaVersion(
+                        id = dub.subjectId ?: id,
+                        label = label,
+                        languageCode = dub.lanCode ?: "en",
+                        isDub = dub.type == 0,
+                        isOriginal = dub.original == true,
+                        streamUrl = directStreamUrl
+                    )
+                )
+                languageSet.add(lanName.replace(" dub", "").replace(" sub", "").trim())
+            }
+
+            // 2. Extract from subtitles if no explicit dubs
+            if (availableVersions.isEmpty() && !dto.subtitles.isNullOrBlank()) {
+                val rawSubs = dto.subtitles!!.split(",").map { it.trim() }.filter { it.isNotBlank() }
+                rawSubs.forEach { sub ->
+                    languageSet.add(sub)
+                }
+
+                // If Indian regional language detected in subtitles or country is India
+                if (dto.subtitles!!.contains("हिन्दी") || dto.subtitles!!.contains("Hindi", ignoreCase = true)) {
+                    availableVersions.add(MediaVersion(id = id, label = "Hindi Version", languageCode = "hi", isOriginal = false))
+                }
+                if (dto.subtitles!!.contains("English", ignoreCase = true)) {
+                    availableVersions.add(MediaVersion(id = id, label = "English Version", languageCode = "en", isOriginal = true))
+                }
+                if (dto.subtitles!!.contains("Español", ignoreCase = true) || dto.subtitles!!.contains("Spanish", ignoreCase = true)) {
+                    availableVersions.add(MediaVersion(id = id, label = "Spanish Version", languageCode = "es", isOriginal = false))
+                }
+            }
+
+            // Fallback default version
+            if (availableVersions.isEmpty()) {
+                val defaultLang = if (dto.countryName.equals("India", ignoreCase = true)) "Hindi Version" else "English Version"
+                availableVersions.add(MediaVersion(id = id, label = defaultLang, languageCode = "en", isOriginal = true))
+            }
+
+            val seasons = if (isSeries) {
+                listOf(
+                    SeasonData(
+                        seasonNumber = 1,
+                        title = "Season 1",
+                        episodes = listOf(
+                            EpisodeData(
+                                id = "${id}_s1_e1",
+                                episodeNumber = 1,
+                                title = "Episode 1: Pilot",
+                                overview = dto.description ?: "Episode 1 of ${dto.title}",
+                                thumbnailUrl = bannerUrl.ifEmpty { posterUrl },
+                                durationMinutes = 45,
+                                streamUrl = directStreamUrl
+                            ),
+                            EpisodeData(
+                                id = "${id}_s1_e2",
+                                episodeNumber = 2,
+                                title = "Episode 2: The Journey",
+                                overview = dto.description ?: "Episode 2 of ${dto.title}",
+                                thumbnailUrl = bannerUrl.ifEmpty { posterUrl },
+                                durationMinutes = 50,
+                                streamUrl = directStreamUrl
+                            )
+                        )
+                    )
+                )
+            } else emptyList()
+
+            return MediaItem(
+                id = id,
+                title = dto.title ?: "Untitled",
+                description = dto.description?.ifBlank { "Experience ${dto.title}, released in $releaseYear." } ?: "",
+                bannerUrl = bannerUrl,
+                posterUrl = posterUrl,
+                type = type,
+                category = forcedCategory,
+                genres = genres,
+                releaseYear = releaseYear,
+                rating = if (dto.countryName == "United States") "TV-MA" else "PG-13",
+                matchPercentage = matchPercentage,
+                durationText = durationText,
+                directStreamUrl = directStreamUrl,
+                isFeatured = isFeatured,
+                cast = castList,
+                seasons = seasons,
+                isTop10 = isTop10Rank || isFeatured || forcedCategory.contains("Popular", ignoreCase = true),
+                badgeLabel = dto.corner ?: if (isTop10Rank) "TOP 10" else if (isFeatured) "EXCLUSIVE" else null,
+                availableLanguages = languageSet.toList().ifEmpty { listOf("English") },
+                availableVersions = availableVersions,
+                countryName = dto.countryName ?: ""
+            )
+        }
+
         fun mediaItemToMap(item: MediaItem): Map<String, Any?> {
             val seasonsMap = item.seasons.map { season ->
                 mapOf(
@@ -227,13 +580,12 @@ class MediaRepository {
                 "cast" to item.cast,
                 "isTop10" to item.isTop10,
                 "badgeLabel" to (item.badgeLabel ?: ""),
-                "seasons" to seasonsMap
+                "seasons" to seasonsMap,
+                "countryName" to item.countryName,
+                "availableLanguages" to item.availableLanguages
             )
         }
 
-        /**
-         * Safely deserializes a Firestore DocumentSnapshot into a MediaItem.
-         */
         fun mapDocumentToMediaItem(doc: DocumentSnapshot): MediaItem? {
             val id = doc.getString("id") ?: doc.id
             val title = doc.getString("title") ?: return null
@@ -257,6 +609,8 @@ class MediaRepository {
             val cast = (doc.get("cast") as? List<*>)?.mapNotNull { it?.toString() } ?: emptyList()
             val isTop10 = doc.getBoolean("isTop10") ?: false
             val badgeLabel = doc.getString("badgeLabel")?.takeIf { it.isNotBlank() }
+            val countryName = doc.getString("countryName") ?: ""
+            val languages = (doc.get("availableLanguages") as? List<*>)?.mapNotNull { it?.toString() } ?: listOf("English")
 
             val rawSeasons = doc.get("seasons") as? List<*> ?: emptyList<Any>()
             val seasons = rawSeasons.mapNotNull { sObj ->
@@ -290,6 +644,11 @@ class MediaRepository {
                 )
             }
 
+            val defaultVersions = listOf(
+                MediaVersion(id = id, label = "English Version", languageCode = "en", isOriginal = true),
+                MediaVersion(id = id, label = "Hindi Version", languageCode = "hi", isOriginal = false)
+            )
+
             return MediaItem(
                 id = id,
                 title = title,
@@ -308,7 +667,10 @@ class MediaRepository {
                 cast = cast,
                 seasons = seasons,
                 isTop10 = isTop10,
-                badgeLabel = badgeLabel
+                badgeLabel = badgeLabel,
+                availableLanguages = languages,
+                availableVersions = defaultVersions,
+                countryName = countryName
             )
         }
     }
