@@ -54,12 +54,12 @@ jobs:
             -validity 10000 \
             -dname "CN=StreamFlix CI,O=StreamFlix,C=IN"
 
-      - name: Build signed release APK with in-process compiler
+      - name: Force Build Release APK
         env:
           KEYSTORE_PATH: ${{ github.workspace }}/my-upload-key.jks
           STORE_PASSWORD: android
           KEY_PASSWORD: android
-        run: gradle --stacktrace -Pkotlin.compiler.execution.strategy=in-process assembleRelease
+        run: gradle --stacktrace assembleRelease -x test
 
       - name: Verify APK outputs
         shell: bash
