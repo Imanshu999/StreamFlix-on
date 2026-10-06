@@ -80,6 +80,23 @@ fun HomeScreen(
             when (selectedCategory) {
                 "TV Shows" -> list = list.filter { it.type == MediaType.SERIES }
                 "Movies" -> list = list.filter { it.type == MediaType.MOVIE }
+                "Anime" -> list = list.filter { item ->
+                    item.category.contains("anime", ignoreCase = true) ||
+                    item.genres.any { it.contains("anime", ignoreCase = true) }
+                }
+                "Cartoon" -> list = list.filter { item ->
+                    item.category.contains("cartoon", ignoreCase = true) ||
+                    item.genres.any { it.contains("cartoon", ignoreCase = true) }
+                }
+                "Trailers" -> list = list.filter { it.badgeLabel?.contains("trailer", ignoreCase = true) == true }
+                "Hindi" -> list = list.filter { item ->
+                    item.availableLanguages.any { it.contains("hindi", ignoreCase = true) } ||
+                    item.availableVersions.any { it.label.contains("hindi", ignoreCase = true) }
+                }
+                "English" -> list = list.filter { item ->
+                    item.availableLanguages.any { it.contains("english", ignoreCase = true) } ||
+                    item.availableVersions.any { it.label.contains("english", ignoreCase = true) }
+                }
                 "Trending" -> list = list.filter { it.category == "Trending Now" || it.isTop10 }
                 "My List" -> list = list.filter { favoriteIds.contains(it.id) }
             }
