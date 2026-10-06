@@ -213,6 +213,11 @@ class StreamFlixViewModel(
                         return
                     }
                 }
+                is ScreenDestination.TvPlayer -> {
+                    _currentScreen.value = ScreenDestination.Downloads
+                    persistScreenState(ScreenDestination.Downloads)
+                    return
+                }
                 is ScreenDestination.Downloads,
                 is ScreenDestination.Splash -> {
                     _currentScreen.value = screen
